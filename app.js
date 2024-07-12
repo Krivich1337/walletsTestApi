@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import mongoose from 'mongoose';
+import { Mutex } from 'async-mutex';
 
 const app = express();
 app.use(express.json());
@@ -51,46 +52,52 @@ const Wallet = mongoose.model('Wallet', walletSchema);
 
 
 
+const transactionLock = new Mutex();
+
 // POST
 app.post('/transfer', async (req, res) => {
     const { token, walletFrom, recipient, amount, currency } = req.body;
 
-    // Token check
-    const user = await User.findOne({ token });
-    if (!user) {
-      return res.status(401).json('Unauthorized. Token not found');
+    await transactionLock.acquire();
+
+    try {
+      // Token check
+      const user = await User.findOne({ token });
+      if (!user) {
+        return res.status(401).json('Unauthorized. Token not found');
+      }
+
+      // Balance check
+      const wallet = await Wallet.findOne({owner: user.username, address: walletFrom});
+      if (!wallet) {
+          return res.status(404).json('Wallet not found');
+      }
+      if (wallet.balance < amount) {
+        return res.status(400).end('Insufficient funds');
+      }
+
+      // Recipient check
+      const recipientUser = await Wallet.findOne({ owner: recipient, currency: currency });
+      if (recipientUser == wallet) {
+          return res.status(400).end('Вы успешно отправили средства сами себе оплатив коммиссию!');
+      }
+      if (!recipientUser) {
+          return res.status(404).end('Recipient not found');
+      }
+
+      // Transfer
+      wallet.balance -= Number(amount);
+      recipientUser.balance += Number(amount);
+
+      wallet.transactions.Transfers.push({ to: recipient.username, walletTo: recipient.address, currency, amount });
+      recipientUser.transactions.Receipts.push({ from: recipient.username, walletFrom, currency, amount });
+
+      await wallet.save();
+      await recipientUser.save();
+      return res.status(200).end('Transfer successful');
+    } finally {
+      transactionLock.release();
     }
-
-    // Balance check
-    const wallet = await Wallet.findOne({owner: user.username, address: walletFrom});
-    if (!wallet) {
-        return res.status(404).json('Wallet not found');
-    }
-    if (wallet.balance < amount) {
-      return res.status(400).end('Insufficient funds');
-    }
-
-    // Recipient check
-    const recipientUser = await Wallet.findOne({ owner: recipient, currency: currency });
-    if (recipientUser == wallet) {
-        return res.status(400).end('Вы успешно отправили средства сами себе оплатив коммиссию!');
-    }
-    if (!recipientUser) {
-        return res.status(404).end('Recipient not found');
-    }
-
-    // Transfer
-    wallet.balance -= Number(amount);
-    recipientUser.balance += Number(amount);
-
-
-    wallet.transactions.Transfers.push({ to: recipient.username, walletTo: recipient.address, currency, amount });
-    recipientUser.transactions.Receipts.push({ from: recipient.username, walletFrom, currency, amount });
-
-    await wallet.save();
-    await recipientUser.save();
-
-    return res.status(200).end('Transfer successful');
 });
 
 app.post('/convert', async (req, res) => {
@@ -100,6 +107,10 @@ app.post('/convert', async (req, res) => {
     if (!user) {
         return res.status(401).end('Unauthorized. Token not found');
     }
+
+  // Here could be a call to the api of exchanger to get the current exchange rate (axios GET request)
+  // But the proposed exchanger to access the api, requires too much personal data for registration
+  // And it's currently unavailable
 
     const rates = {
         RUB: 87.91,
